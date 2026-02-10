@@ -1,0 +1,331 @@
+---
+title: "Light × Water Coexistence Analysis (Portfolio-Safe Demonstration)"
+author: "Vinayak Prakash Saini"
+date: "`r Sys.Date()`"
+output:
+  word_document:
+    reference_docx: null
+---
+
+# Purpose (Portfolio-Safe)
+
+This R Markdown reproduces the **core logic** of a light × water coexistence analysis using the **Kandlikar-style log biomass ratio framework**, while avoiding any project-specific identifiers or data.
+
+What this demonstrates:
+- factorial experimental design handling (Light × Water)
+- de-identified soil conditioning logic (conspecific / heterospecific / reference)
+- estimation of log-response ratios (m-values)
+- computation of **Stabilization** and **Fitness differences** using explicit formulas
+- coexistence region classification + visualization
+
+All data below are **synthetic** (simulated) but match the analysis structure.
+
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+set.seed(1234)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(emmeans)
+  library(patchwork)
+})
+
+theme_set(theme_classic(base_size = 11))
+```
+
+# 1) Simulate a Light × Water dataset (de-identified)
+
+We simulate two species (Species_A, Species_B) measured under:
+- Light: Low / High
+- Water: Low / High
+- Soil context:
+  - con = conspecific-conditioned soil
+  - het = heterospecific-conditioned soil
+  - ref = reference soil (we allow two reference types: "ref_fd" and "ref_st")
+
+```{r simulate-data}
+n_rep <- 30
+
+design <- tidyr::expand_grid(
+  species = c("Species_A", "Species_B"),
+  light   = c("LowLight", "HighLight"),
+  water   = c("LowWater", "HighWater"),
+  soil    = c("con", "het", "ref_fd", "ref_st"),
+  rep     = 1:n_rep
+) %>%
+  mutate(
+    env = factor(paste(water, light, sep = "_")),
+    light = factor(light, levels = c("LowLight", "HighLight")),
+    water = factor(water, levels = c("LowWater", "HighWater")),
+    species = factor(species),
+    soil = factor(soil, levels = c("con","het","ref_fd","ref_st"))
+  )
+
+# --- Simulation model (synthetic, but structured) ---
+# baseline differs by species
+sp_baseline <- c(Species_A = 1.7, Species_B = 1.5)
+
+# environment main effects (on log-scale)
+eff_light_high <- 0.35
+eff_water_high <- 0.45
+eff_interaction <- 0.25  # extra boost when HighWater & HighLight
+
+# soil effects (microbe mediation signature)
+# con/het are relative to reference; direction varies by env to emulate context dependence
+soil_effect <- design %>%
+  transmute(
+    species, env, soil,
+    soil_delta =
+      case_when(
+        soil %in% c("ref_fd","ref_st") ~ 0,
+        soil == "con" & env %in% c("HighWater_LowLight") ~  0.25,
+        soil == "con" & env %in% c("LowWater_HighLight") ~ -0.20,
+        soil == "het" & env %in% c("HighWater_LowLight") ~ -0.10,
+        soil == "het" & env %in% c("LowWater_HighLight") ~  0.05,
+        soil == "con" ~  0.05,
+        soil == "het" ~ -0.05,
+        TRUE ~ 0
+      )
+  )
+
+dat <- design %>%
+  left_join(soil_effect, by = c("species","env","soil")) %>%
+  mutate(
+    # env numeric indicators
+    L_hi = as.numeric(light == "HighLight"),
+    W_hi = as.numeric(water == "HighWater"),
+    LW_hi = as.numeric(light == "HighLight" & water == "HighWater"),
+
+    # expected log biomass
+    mu_log =
+      unname(sp_baseline[as.character(species)]) +
+      eff_light_high * L_hi +
+      eff_water_high * W_hi +
+      eff_interaction * LW_hi +
+      soil_delta +
+      rnorm(n(), 0, 0.12),  # small unmodeled variation
+
+    # observed biomass on natural scale (positive)
+    biomass_total = exp(mu_log + rnorm(n(), 0, 0.25))
+  ) %>%
+  select(species, light, water, env, soil, rep, biomass_total)
+
+glimpse(dat)
+```
+
+---
+
+# 2) Kandlikar-style m-values (log biomass ratios)
+
+## Definition (explicit)
+
+For each environment and species, we compute log ratios relative to a chosen **reference soil**.
+
+Let `m` be the log biomass ratio:
+
+- **m_ii** = log(Biomass of species *i* in **conspecific** soil) − log(Biomass of species *i* in **reference** soil)
+- **m_ij** = log(Biomass of species *i* in **heterospecific** soil) − log(Biomass of species *i* in **reference** soil)
+
+We estimate log means using `emmeans` on `log(biomass_total)`.
+
+```{r m-values-functions}
+compute_m_values <- function(dat, reference_soil = c("ref_fd","ref_st")) {
+  reference_soil <- match.arg(reference_soil)
+
+  # Keep only con/het and the chosen reference
+  d <- dat %>%
+    filter(soil %in% c("con","het", reference_soil)) %>%
+    mutate(
+      soil3 = factor(ifelse(soil == reference_soil, "ref", as.character(soil)),
+                     levels = c("ref","con","het"))
+    )
+
+  # Model for estimated log means (simple, transparent; no project-specific structure)
+  fit <- lm(log(biomass_total) ~ species * env * soil3, data = d)
+
+  # Estimated log means for each species × env × soil3
+  emm <- emmeans::emmeans(fit, ~ soil3 | species * env) %>%
+    as.data.frame()
+
+  # Compute m-values (con - ref, het - ref) on log scale
+  m <- emm %>%
+    select(species, env, soil3, emmean) %>%
+    pivot_wider(names_from = soil3, values_from = emmean) %>%
+    mutate(
+      m_con = con - ref,
+      m_het = het - ref,
+      reference = reference_soil
+    ) %>%
+    select(species, env, reference, m_con, m_het)
+
+  return(m)
+}
+
+m_fd <- compute_m_values(dat, reference_soil = "ref_fd")
+m_st <- compute_m_values(dat, reference_soil = "ref_st")
+
+m_all <- bind_rows(m_fd, m_st)
+m_all
+```
+
+---
+
+# 3) Stabilization and Fitness Differences (explicit formulas)
+
+We define two species:
+- Species_A (call it **S**)
+- Species_B (call it **L**)
+
+Map m-values:
+- mSS = m_con of Species_A (A in conspecific soil)
+- mSL = m_het of Species_A (A in heterospecific soil)
+- mLL = m_con of Species_B (B in conspecific soil)
+- mLS = m_het of Species_B (B in heterospecific soil)
+
+## Formulas (Kandlikar-style)
+
+**Stabilization** (frequency-dependent component):
+\[
+\text{Stabilization} = -\frac{1}{2}\,(m_{SS} - m_{SL} - m_{LS} + m_{LL})
+\]
+
+**Fitness difference** (average advantage; sign indicates which species is favored):
+\[
+\text{FitnessDiff} = \frac{1}{2}\,(m_{LL} + m_{LS} - m_{SS} - m_{SL})
+\]
+
+```{r coexistence-metrics}
+coexist_metrics <- function(m_df) {
+  # m_df has rows species × env × reference with m_con, m_het
+  wide <- m_df %>%
+    mutate(species = as.character(species)) %>%
+    pivot_wider(
+      id_cols = c(env, reference),
+      names_from = species,
+      values_from = c(m_con, m_het)
+    )
+
+  # identify column names robustly
+  # expected: m_con_Species_A, m_het_Species_A, m_con_Species_B, m_het_Species_B
+  get_col <- function(prefix, sp) paste0(prefix, "_", sp)
+
+  mSS <- wide[[ get_col("m_con", "Species_A") ]]
+  mSL <- wide[[ get_col("m_het", "Species_A") ]]
+  mLL <- wide[[ get_col("m_con", "Species_B") ]]
+  mLS <- wide[[ get_col("m_het", "Species_B") ]]
+
+  out <- wide %>%
+    mutate(
+      mSS = mSS, mSL = mSL, mLL = mLL, mLS = mLS,
+      stabilization = -0.5 * (mSS - mSL - mLS + mLL),
+      fitness_diff  =  0.5 * (mLL + mLS - mSS - mSL)
+    ) %>%
+    select(env, reference, mSS, mSL, mLS, mLL, stabilization, fitness_diff)
+
+  out
+}
+
+metrics <- coexist_metrics(m_all)
+
+metrics
+```
+
+---
+
+# 4) Coexistence outcome classification (geometry)
+
+Using the standard geometric interpretation:
+- **Coexistence** if stabilization > 0 and |fitness_diff| < stabilization
+- **Exclusion (Species_B wins)** if fitness_diff > stabilization
+- **Exclusion (Species_A wins)** if fitness_diff < -stabilization
+- **Priority effects** if stabilization < 0 and |fitness_diff| < -stabilization
+- Otherwise: **Indeterminate/Other**
+
+```{r classify}
+metrics <- metrics %>%
+  mutate(
+    outcome = case_when(
+      stabilization > 0 & abs(fitness_diff) < stabilization ~ "Coexistence",
+      fitness_diff > stabilization ~ "Exclusion: Species_B",
+      fitness_diff < -stabilization ~ "Exclusion: Species_A",
+      stabilization < 0 & abs(fitness_diff) < -stabilization ~ "Priority Effect",
+      TRUE ~ "Other"
+    )
+  )
+
+metrics
+```
+
+---
+
+# 5) Visualization: Stabilization vs Fitness Differences
+
+```{r plot-coexistence, fig.width=9, fig.height=4.5}
+# Helper for pretty facet labels
+env_lab <- c(
+  "LowWater_LowLight"   = "Low water × Low light",
+  "LowWater_HighLight"  = "Low water × High light",
+  "HighWater_LowLight"  = "High water × Low light",
+  "HighWater_HighLight" = "High water × High light"
+)
+
+# Define polygon regions for shading (optional, light-touch)
+region_polys <- function(xlim = c(-2,2), ylim = c(-2,2), n = 200) {
+  x <- seq(xlim[1], xlim[2], length.out = n)
+  tibble(
+    x = x,
+    y_upper = x,    # y = +x
+    y_lower = -x    # y = -x
+  )
+}
+
+lims <- 1.6
+poly_df <- region_polys(c(-lims, lims), c(-lims, lims), n = 400)
+
+p <- ggplot() +
+  # diagonal boundaries y = ±x
+  geom_line(data = poly_df, aes(x = x, y = y_upper), linetype = "dashed", linewidth = 0.4) +
+  geom_line(data = poly_df, aes(x = x, y = y_lower), linetype = "dashed", linewidth = 0.4) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_vline(xintercept = 0, linewidth = 0.3) +
+  geom_point(
+    data = metrics,
+    aes(x = stabilization, y = fitness_diff, shape = outcome),
+    size = 2.2
+  ) +
+  scale_x_continuous(limits = c(-lims, lims), name = "Stabilization") +
+  scale_y_continuous(limits = c(-lims, lims), name = "Fitness difference") +
+  facet_grid(reference ~ env, labeller = labeller(env = env_lab)) +
+  ggtitle("Coexistence Map (Synthetic Demonstration)") +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_rect(fill = "grey95", color = NA),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4)
+  )
+
+p
+```
+
+---
+
+# 6) Export-ready table (optional)
+
+```{r export-table}
+export_tbl <- metrics %>%
+  arrange(reference, env) %>%
+  mutate(
+    env = recode(env, !!!env_lab)
+  )
+
+export_tbl
+```
+
+---
+
+# Notes on De-identification
+
+- Species labels are generic (Species_A / Species_B).
+- Environmental factors are generic (Low/High light; Low/High water).
+- Reference soils are generic placeholders (ref_fd, ref_st) to demonstrate the concept of different baselines.
+- No project paths, identifiers, or manuscript-specific content are included.
