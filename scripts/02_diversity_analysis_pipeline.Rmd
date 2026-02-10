@@ -1,0 +1,413 @@
+---
+title: "High-Dimensional Diversity Modeling Pipeline (Reproducible Scientific Workflow)"
+author: "Vinayak Prakash Saini"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+  word_document:
+    reference_docx: null
+---
+
+# Purpose
+
+This document demonstrates a structured, reproducible workflow for high-dimensional community data analysis, integrating statistical modeling, multivariate ordination, and export-ready reporting.
+
+The pipeline emphasizes:
+
+- Structured directory governance (single-root design)
+- Modular helper functions
+- Input validation and reproducibility scaffolding
+- Alpha diversity computation with mixed-effects modeling
+- Beta diversity ordination and PERMANOVA
+- Export-ready tables and figures
+
+All identifiers are de-identified.  
+The workflow runs either on:
+
+1. User-supplied matrices and metadata (drop-in mode), or  
+2. A synthetic dataset generated internally (default fallback).
+
+No unpublished or project-specific datasets are included.
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(vegan)
+  library(ape)
+  library(lme4)
+  library(broom.mixed)
+  library(glue)
+})
+
+set.seed(123)
+```
+
+# 0) Canonical Root and Directory Governance
+
+This pipeline follows a single-root rule to prevent path drift and ensure reproducibility.
+
+```{r paths}
+# -------------------------------------------------------------------------
+# CANONICAL ROOT (Single Source of Truth)
+# -------------------------------------------------------------------------
+ROOT <- here::here("outputs", "portfolio_demo")
+
+# -------------------------------------------------------------------------
+# DIRECTORY HELPERS (Do not redefine elsewhere)
+# -------------------------------------------------------------------------
+proc_dir  <- function(assay) file.path(ROOT, "processed_data", assay)
+plot_dir  <- function(assay) file.path(ROOT, "plot_data", assay)
+tbl_dir   <- function()      file.path(ROOT, "tables")
+fig_dir   <- function()      file.path(ROOT, "figures")
+cache_dir <- function()      file.path(ROOT, "cache")
+
+dir.create(ROOT, recursive = TRUE, showWarnings = FALSE)
+dir.create(tbl_dir(), recursive = TRUE, showWarnings = FALSE)
+dir.create(fig_dir(), recursive = TRUE, showWarnings = FALSE)
+dir.create(cache_dir(), recursive = TRUE, showWarnings = FALSE)
+```
+
+---
+
+# 1) Inputs (Drop-in Mode or Synthetic Fallback)
+
+## Expected Drop-in Structure
+
+If running on real data, place:
+
+- `counts_matrix.rds` — samples × taxa integer count matrix  
+- `metadata.csv` — sample metadata containing `sample_id`  
+
+under:
+
+```
+outputs/portfolio_demo/processed_data/<assay>/
+```
+
+---
+
+```{r input-controls}
+ASSAY <- "Assay_A"
+
+counts_path <- file.path(proc_dir(ASSAY), "counts_matrix.rds")
+meta_path   <- file.path(proc_dir(ASSAY), "metadata.csv")
+
+dir.create(proc_dir(ASSAY), recursive = TRUE, showWarnings = FALSE)
+dir.create(plot_dir(ASSAY), recursive = TRUE, showWarnings = FALSE)
+```
+
+---
+
+## Synthetic Dataset Generator (Default Fallback)
+
+```{r simulate-data}
+simulate_demo_data <- function(n_samples = 96, n_taxa = 400) {
+
+  sample_id <- sprintf("S%03d", 1:n_samples)
+
+  metadata <- tibble(
+    sample_id = sample_id,
+    env_factor_1 = factor(sample(c("Low", "High"), n_samples, TRUE)),
+    env_factor_2 = factor(sample(c("Low", "High"), n_samples, TRUE)),
+    block = factor(sample(1:8, n_samples, TRUE)),
+    batch = factor(sample(1:3, n_samples, TRUE))
+  )
+
+  # Baseline taxon means
+  base_mu <- rgamma(n_taxa, shape = 2, rate = 0.1)
+  mu_mat <- matrix(rep(base_mu, each = n_samples),
+                   nrow = n_samples, byrow = FALSE)
+
+  # Introduce weak environmental structure
+  env_shift <- ifelse(metadata$env_factor_1 == "High", 1.15, 1.0) *
+               ifelse(metadata$env_factor_2 == "High", 1.10, 1.0)
+
+  mu_mat <- mu_mat * env_shift
+
+  counts <- matrix(
+    rnbinom(n_samples * n_taxa,
+            mu = as.vector(mu_mat),
+            size = 10),
+    nrow = n_samples,
+    ncol = n_taxa
+  )
+
+  rownames(counts) <- sample_id
+  colnames(counts) <- sprintf("Taxon_%04d", seq_len(n_taxa))
+
+  list(counts = counts, metadata = metadata)
+}
+```
+
+---
+
+## Load Data or Generate Synthetic
+
+```{r load-data}
+if (file.exists(counts_path) && file.exists(meta_path)) {
+
+  counts <- readRDS(counts_path)
+  metadata <- read_csv(meta_path, show_col_types = FALSE)
+
+  stopifnot(is.matrix(counts) || is.data.frame(counts))
+  counts <- as.matrix(counts)
+  stopifnot("sample_id" %in% names(metadata))
+
+  common <- intersect(rownames(counts), metadata$sample_id)
+
+  counts <- counts[common, , drop = FALSE]
+  metadata <- metadata %>%
+    filter(sample_id %in% common) %>%
+    arrange(match(sample_id, common))
+
+} else {
+
+  demo <- simulate_demo_data()
+  counts <- demo$counts
+  metadata <- demo$metadata
+
+  saveRDS(counts, counts_path)
+  write_csv(metadata, meta_path)
+}
+
+dim(counts)
+head(metadata)
+```
+
+---
+
+# 2) Preprocessing: Filtering and Normalization
+
+## Taxon Filtering
+
+```{r filtering}
+filter_taxa <- function(counts,
+                        min_total = 30,
+                        min_prevalence = 0.05) {
+
+  stopifnot(nrow(counts) > 0,
+            ncol(counts) > 0)
+
+  total_abundance <- colSums(counts)
+  prevalence <- colMeans(counts > 0)
+
+  keep <- (total_abundance >= min_total) &
+          (prevalence >= min_prevalence)
+
+  counts[, keep, drop = FALSE]
+}
+
+counts_filt <- filter_taxa(counts)
+
+c(
+  taxa_raw = ncol(counts),
+  taxa_filtered = ncol(counts_filt)
+)
+```
+
+---
+
+## Relative Abundance Transformation
+
+```{r normalization}
+rel_abund <- sweep(counts_filt,
+                   1,
+                   rowSums(counts_filt),
+                   FUN = "/")
+
+rel_abund[is.na(rel_abund)] <- 0
+```
+
+---
+
+# 3) Alpha Diversity
+
+## Diversity Metrics
+
+```{r alpha-metrics}
+alpha_diversity <- function(counts_mat) {
+
+  stopifnot(all(counts_mat >= 0))
+
+  tibble(
+    sample_id = rownames(counts_mat),
+    richness = rowSums(counts_mat > 0),
+    shannon  = diversity(counts_mat, index = "shannon"),
+    simpson  = diversity(counts_mat, index = "simpson")
+  )
+}
+
+alpha <- alpha_diversity(counts_filt) %>%
+  left_join(metadata, by = "sample_id")
+
+glimpse(alpha)
+```
+
+---
+
+## Mixed-Effects Modeling
+
+```{r alpha-model}
+alpha_model <- lmer(
+  shannon ~ env_factor_1 * env_factor_2 +
+    (1 | block) + (1 | batch),
+  data = alpha
+)
+
+alpha_summary <- broom.mixed::tidy(alpha_model,
+                                   effects = "fixed")
+
+alpha_summary
+```
+
+---
+
+## Export Alpha Plot Data
+
+```{r alpha-export}
+alpha_plot_tbl <- alpha %>%
+  select(sample_id,
+         env_factor_1,
+         env_factor_2,
+         block,
+         batch,
+         richness,
+         shannon,
+         simpson)
+
+write_csv(alpha_plot_tbl,
+          file.path(plot_dir(ASSAY),
+                    "alpha_diversity_plot_data.csv"))
+```
+
+---
+
+# 4) Beta Diversity
+
+## Bray–Curtis Dissimilarity
+
+```{r beta-distance}
+bray_dist <- vegdist(counts_filt,
+                     method = "bray")
+```
+
+---
+
+## PCoA Ordination
+
+```{r beta-ordination}
+pcoa_res <- cmdscale(bray_dist,
+                     eig = TRUE,
+                     k = 2)
+
+ordination_scores <- as.data.frame(pcoa_res$points)
+colnames(ordination_scores) <- c("Axis1", "Axis2")
+ordination_scores$sample_id <- rownames(ordination_scores)
+
+ordination_scores <- ordination_scores %>%
+  left_join(metadata, by = "sample_id")
+
+head(ordination_scores)
+```
+
+---
+
+## PERMANOVA
+
+```{r permanova}
+permanova_res <- adonis2(
+  bray_dist ~ env_factor_1 * env_factor_2,
+  data = metadata,
+  permutations = 999
+)
+
+permanova_res
+```
+
+---
+
+## Export Beta Plot Data
+
+```{r beta-export}
+write_csv(ordination_scores,
+          file.path(plot_dir(ASSAY),
+                    "beta_pcoa_plot_data.csv"))
+```
+
+---
+
+# 5) Minimal Publication-Style Visualizations
+
+```{r plots, fig.width=6.5, fig.height=4.5}
+p_alpha <- ggplot(alpha,
+                  aes(x = env_factor_1,
+                      y = shannon,
+                      shape = env_factor_2)) +
+  geom_point(position = position_jitter(width = 0.12),
+             alpha = 0.7) +
+  stat_summary(fun = mean,
+               geom = "point",
+               size = 3) +
+  labs(title = "Alpha Diversity (Shannon)",
+       x = "Environmental Factor 1",
+       y = "Shannon Index") +
+  theme(legend.position = "bottom")
+
+p_beta <- ggplot(ordination_scores,
+                 aes(x = Axis1,
+                     y = Axis2,
+                     shape = env_factor_2)) +
+  geom_point(alpha = 0.8) +
+  facet_wrap(~ env_factor_1) +
+  labs(title = "Beta Diversity (PCoA on Bray–Curtis)",
+       x = "PCoA Axis 1",
+       y = "PCoA Axis 2") +
+  theme(legend.position = "bottom")
+
+p_alpha
+p_beta
+```
+
+---
+
+## Save Figures
+
+```{r save-figures}
+ggsave(file.path(fig_dir(),
+                 glue("{ASSAY}_alpha_shannon.png")),
+       width = 6.5, height = 4.5, dpi = 300)
+
+ggsave(file.path(fig_dir(),
+                 glue("{ASSAY}_beta_pcoa.png")),
+       width = 6.5, height = 4.5, dpi = 300)
+```
+
+---
+
+# 6) Reproducibility Metadata
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+# De-identification Notes
+
+- Assay names, taxa IDs, and sample IDs are placeholders.
+- Environmental variables are generic.
+- No project-specific directories, manuscript identifiers, or institutional references are included.
+- All data are synthetic unless user-supplied.
+- The modeling and multivariate statistical structure is fully preserved.
