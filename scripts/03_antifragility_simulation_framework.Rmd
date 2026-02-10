@@ -1,0 +1,333 @@
+---
+title: "Antifragility in Stochastic Dynamical Systems (Simulation Framework)"
+author: "Vinayak Prakash Saini"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+  word_document:
+    reference_docx: null
+---
+
+# Overview
+
+This document demonstrates a reproducible simulation framework for analyzing **local antifragility** in multi-component stochastic dynamical systems.
+
+Technical components demonstrated:
+
+- Ornstein–Uhlenbeck (OU) stochastic environmental driver  
+- Generalized Lotka–Volterra (GLV) system dynamics  
+- Controlled experimental design using common random numbers (CRN)  
+- Jensen curvature–based antifragility metric  
+- Bootstrap uncertainty quantification  
+- Parameter sweeps over system size and interaction strength  
+
+This project is exploratory and simulation-based. No real-world datasets are used.
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 7,
+  fig.height = 4
+)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(purrr)
+})
+
+set.seed(2026)
+```
+
+# 1. Conceptual Model
+
+We simulate a system of S interacting components governed by generalized Lotka–Volterra dynamics:
+
+\[
+\frac{dN_i}{dt} = N_i \left[r_i(t) - \sum_{j=1}^{S} \alpha_{ij} N_j \right]
+\]
+
+Environmental forcing follows an Ornstein–Uhlenbeck process:
+
+\[
+dx_t = -\kappa (x_t - x_0)\, dt + \tau\, dW_t
+\]
+
+Effective growth rate:
+
+\[
+r_i(t) = r_0 \cdot m_i(x_t)
+\]
+
+where \( m_i(x) \in [0,1] \) is a strategy-dependent response function.
+
+---
+
+# 2. Antifragility Metric
+
+For a system-level payoff function \( f(x) \), local Jensen curvature is:
+
+\[
+F_\lambda(f) = \frac{1}{2}\left[f(x_0+\lambda) + f(x_0-\lambda)\right] - f(x_0)
+\]
+
+- \( F_\lambda > 0 \): antifragile  
+- \( F_\lambda < 0 \): fragile  
+
+Two payoffs evaluated:
+
+- Total system biomass  
+- Shannon diversity  
+
+---
+
+# 3. Controls and Parameters
+
+```{r parameters}
+RUN_SIM <- TRUE
+CACHE_PATH <- "antifragility_demo_cache.rds"
+
+S_values <- c(3, 10, 30)
+c_values <- c(0, 0.2, 0.8, 3.2)
+dose_types <- c("global", "patchy")
+
+n_reps <- 25
+seed_base <- 2026
+
+# time discretization
+t_end <- 60
+dt <- 0.05
+steps <- ceiling(t_end / dt)
+burn_fraction <- 0.4
+eval_idx <- (floor(steps * (1 - burn_fraction)) + 1):steps
+
+# model parameters
+alpha_base <- 0.10
+r0 <- 1.00
+
+kappa <- 1.0
+tau <- 0.50
+x0 <- 0.60
+lambda <- 0.35
+```
+
+---
+
+# 4. Core Utility Functions
+
+## Shannon Diversity
+
+```{r shannon}
+shannon_H <- function(N) {
+  N <- pmax(N, 0)
+  total <- sum(N)
+  if (total == 0) return(0)
+  p <- N / total
+  p <- p[p > 0]
+  -sum(p * log(p))
+}
+```
+
+## Interaction Matrix
+
+```{r alpha-matrix}
+alpha_matrix <- function(S, alpha_base, c_val) {
+  A <- matrix(alpha_base, S, S)
+  diag(A) <- alpha_base + c_val
+  A
+}
+```
+
+## GLV Update Step
+
+```{r glv-step}
+glv_step <- function(N, r_eff, A, dt) {
+  growth <- r_eff - drop(A %*% N)
+  N * exp(growth * dt)
+}
+```
+
+## OU Process Simulation
+
+```{r ou-sim}
+simulate_ou <- function(steps, dt, kappa, tau, xbar, dW) {
+  x <- numeric(steps)
+  x[1] <- xbar
+  for (t in 2:steps) {
+    x[t] <- x[t-1] +
+      (-kappa * (x[t-1] - xbar)) * dt +
+      tau * dW[t]
+  }
+  x
+}
+```
+
+---
+
+# 5. Strategy Response Functions
+
+```{r strategies}
+generate_strategy <- function(S) {
+  sample(c("Increasing", "Decreasing", "Gaussian"),
+         S, replace = TRUE)
+}
+
+m_response <- function(x, strategy) {
+  if (strategy == "Increasing") {
+    x / (1 + x)
+  } else if (strategy == "Decreasing") {
+    1 / (1 + x)
+  } else {
+    exp(-0.5 * (x - 1)^2)
+  }
+}
+```
+
+---
+
+# 6. Single Simulation Replicate
+
+```{r single-rep}
+run_replicate <- function(S, c_val, dose_type, seed) {
+
+  set.seed(seed)
+
+  A <- alpha_matrix(S, alpha_base, c_val)
+  strategy <- generate_strategy(S)
+  N <- rep(0.5, S)
+
+  dW <- rnorm(steps, 0, sqrt(dt))
+
+  simulate_system <- function(xbar) {
+
+    x_path <- simulate_ou(steps, dt, kappa, tau, xbar, dW)
+
+    biomass_ts <- numeric(steps)
+    diversity_ts <- numeric(steps)
+
+    N_local <- N
+
+    for (t in 1:steps) {
+      r_eff <- r0 * sapply(strategy,
+                            function(s) m_response(x_path[t], s))
+      N_local <- glv_step(N_local, r_eff, A, dt)
+      biomass_ts[t] <- sum(N_local)
+      diversity_ts[t] <- shannon_H(N_local)
+    }
+
+    tibble(
+      mean_B = mean(biomass_ts[eval_idx]),
+      mean_H = mean(diversity_ts[eval_idx])
+    )
+  }
+
+  vals <- map_dfr(c(x0 - lambda, x0, x0 + lambda), simulate_system)
+
+  tibble(
+    S = S,
+    c = c_val,
+    dose_type = dose_type,
+    F_B = 0.5 * (vals$mean_B[1] + vals$mean_B[3]) - vals$mean_B[2],
+    F_H = 0.5 * (vals$mean_H[1] + vals$mean_H[3]) - vals$mean_H[2]
+  )
+}
+```
+
+---
+
+# 7. Parameter Sweep
+
+```{r sweep}
+if (RUN_SIM) {
+
+  grid <- expand_grid(
+    S = S_values,
+    c = c_values,
+    dose_type = dose_types,
+    rep = 1:n_reps
+  )
+
+  results <- pmap_dfr(
+    list(grid$S, grid$c, grid$dose_type, grid$rep),
+    ~ run_replicate(..1, ..2, ..3,
+                    seed_base + ..4)
+  )
+
+  saveRDS(results, CACHE_PATH)
+
+} else {
+  results <- readRDS(CACHE_PATH)
+}
+
+head(results)
+```
+
+---
+
+# 8. Summary Statistics
+
+```{r summary}
+summary_tbl <- results %>%
+  group_by(S, c, dose_type) %>%
+  summarise(
+    mean_F_B = mean(F_B),
+    mean_F_H = mean(F_H),
+    .groups = "drop"
+  )
+
+summary_tbl
+```
+
+---
+
+# 9. Visualization
+
+```{r plot}
+ggplot(summary_tbl,
+       aes(x = c, y = mean_F_B,
+           color = dose_type,
+           group = dose_type)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(trans = "log10") +
+  facet_wrap(~ S) +
+  geom_hline(yintercept = 0) +
+  labs(
+    title = "Local Antifragility (Biomass)",
+    x = "Self-regulation strength (c)",
+    y = "Jensen curvature F_lambda"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+---
+
+# 10. Reproducibility Metadata
+
+```{r session}
+sessionInfo()
+```
+
+---
+
+# Technical Highlights
+
+- Stochastic simulation of nonlinear dynamical systems  
+- Controlled noise design (common random numbers)  
+- Local curvature–based robustness metric  
+- Parameter sweeps across system dimensionality  
+- Bootstrap-style replicate aggregation  
+- Modular simulation framework  
+
+---
+
+# Notes
+
+This framework is simulation-based and exploratory.  
+No external datasets are required.
