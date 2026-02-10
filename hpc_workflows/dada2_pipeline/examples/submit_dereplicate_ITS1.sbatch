@@ -23,18 +23,18 @@ R_ENV_NAME="${R_ENV_NAME:-updated_r_env}"
 # ----------------------------
 # Environment activation (edit as needed for your cluster)
 # ----------------------------
-if [[ -f "/usr/local/packages/conda/23.11.0/etc/profile.d/conda.sh" ]]; then
-  source "/usr/local/packages/conda/23.11.0/etc/profile.d/conda.sh"
+## Conda activation (override via CONDA_SH environment variable)
+if [[ -n "${CONDA_SH:-}" && -f "${CONDA_SH}" ]]; then
+  source "${CONDA_SH}"
   conda activate "${R_ENV_NAME}"
 else
-  echo "WARNING: conda.sh not found; ensure R + dada2 are available." >&2
+  echo "WARNING: CONDA_SH not set or file not found; ensure R + dada2 are available." >&2
 fi
 
 # ----------------------------
 # Run
 # ----------------------------
 Rscript "${SCRIPTS_DIR}/dereplicate_ITS1.R" \
-  --amplicon "ITS1" \
   --input-base "${INPUT_BASE}" \
   --output-base "${OUTPUT_BASE}"
 

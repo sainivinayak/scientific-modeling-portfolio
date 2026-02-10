@@ -24,6 +24,11 @@ pattern_r1  <- get_arg("--pattern-r1", "_R1.fastq_filtered.fastq.gz")
 pattern_r2  <- get_arg("--pattern-r2", "_R2.fastq_filtered.fastq.gz")
 force       <- has_flag("--force")
 
+# Number of threads allocated by Slurm.  DADA2 dereplication itself is single-threaded,
+# but reading this value is useful for logging and potential downstream steps.
+n_threads <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "1"))
+message("n_threads (SLURM_CPUS_PER_TASK): ", n_threads)
+
 if (is.null(amplicon) || is.null(input_base)) {
   stop(
     "Usage:\n",

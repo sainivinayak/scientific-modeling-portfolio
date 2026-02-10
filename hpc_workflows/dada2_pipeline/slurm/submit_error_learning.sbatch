@@ -24,11 +24,12 @@ SCRIPTS_DIR="${SCRIPTS_DIR:-${PIPELINE_ROOT}/scripts}"
 # ----------------------------
 # module load ...
 
-if [[ -f "/usr/local/packages/conda/23.11.0/etc/profile.d/conda.sh" ]]; then
-  source "/usr/local/packages/conda/23.11.0/etc/profile.d/conda.sh"
+## Conda activation (override via CONDA_SH environment variable)
+if [[ -n "${CONDA_SH:-}" && -f "${CONDA_SH}" ]]; then
+  source "${CONDA_SH}"
   conda activate "${R_ENV_NAME}"
 else
-  echo "WARNING: conda.sh not found; ensure R + dada2 are available in the environment." >&2
+  echo "WARNING: CONDA_SH not set or file not found; ensure R + dada2 are available in the environment." >&2
 fi
 
 # ----------------------------

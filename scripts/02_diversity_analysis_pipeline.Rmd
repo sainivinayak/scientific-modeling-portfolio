@@ -1,6 +1,6 @@
 ---
-title: "High-Dimensional Diversity Modeling Pipeline (Reproducible Scientific Workflow)"
-author: "Vinayak Prakash Saini"
+title: "High‑Dimensional Diversity Modeling Pipeline (Reproducible Scientific Workflow)"
+author: "Ecology Graduate Student"
 date: "`r Sys.Date()`"
 output:
   html_document:

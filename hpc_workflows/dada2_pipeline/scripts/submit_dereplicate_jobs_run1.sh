@@ -20,11 +20,16 @@ set -euo pipefail
 DEFAULT_AMPLICONS="ITS1,V1V2,V2V3,V3V4,V4V5,V5V7,V7V9"
 AMPLICONS_CSV="${DEFAULT_AMPLICONS}"
 
-TEMPLATE="submit_dereplicate_run1.sbatch"
+# Determine this script's directory so we can reference relative resources
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+
+# Default template path points to the slurm directory relative to this script
+TEMPLATE="${SCRIPT_DIR}/../slurm/submit_dereplicate_run1.sbatch"
 OUT_DIR="generated_sbatch"
 DRY_RUN=0
 RUN_GENERATOR=1
-GENERATOR="create_dereplicate_scripts_run1.sh"
+# Default generator script relative to this script
+GENERATOR="${SCRIPT_DIR}/create_dereplicate_scripts_run1.sh"
 
 usage() {
   cat <<EOF

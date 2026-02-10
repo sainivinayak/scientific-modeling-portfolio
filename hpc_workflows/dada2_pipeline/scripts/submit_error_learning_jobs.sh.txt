@@ -16,13 +16,9 @@ set -euo pipefail
 DEFAULT_AMPLICONS="ITS1,V1V2,V2V3,V3V4,V4V5,V5V7,V7V9"
 AMPLICONS_CSV="${DEFAULT_AMPLICONS}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-TEMPLATE="${SCRIPT_DIR}/../slurm/submit_error_learning.sbatch"
+TEMPLATE="submit_error_learning.sbatch"
 OUT_DIR="generated_sbatch"
 DRY_RUN=0
-RUN_GENERATOR=1
-# Default generator script relative to this script
-GENERATOR="${SCRIPT_DIR}/create_error_learning_scripts.sh"
 
 usage() {
   cat <<EOF
@@ -32,8 +28,6 @@ Options:
   --amplicons   Comma-separated list (default: ${DEFAULT_AMPLICONS})
   --template    Path to sbatch template (default: ${TEMPLATE})
   --out-dir     Directory for generated sbatch files (default: ${OUT_DIR})
-  --no-generate Do not run the R-script generator step
-  --generator   Path to generator script (default: ${GENERATOR})
   --dry-run     Print actions without running sbatch
   -h, --help    Show this help
 EOF
@@ -44,8 +38,6 @@ while [[ $# -gt 0 ]]; do
     --amplicons) AMPLICONS_CSV="$2"; shift 2 ;;
     --template)  TEMPLATE="$2"; shift 2 ;;
     --out-dir)   OUT_DIR="$2"; shift 2 ;;
-    --no-generate) RUN_GENERATOR=0; shift ;;
-    --generator) GENERATOR="$2"; shift 2 ;;
     --dry-run)   DRY_RUN=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -58,19 +50,6 @@ if [[ ! -f "${TEMPLATE}" ]]; then
 fi
 
 mkdir -p "${OUT_DIR}"
-
-# Optional: generate per-amplicon R scripts first
-if [[ "${RUN_GENERATOR}" -eq 1 ]]; then
-  if [[ -f "${GENERATOR}" ]]; then
-    if [[ "${DRY_RUN}" -eq 1 ]]; then
-      echo "[DRY RUN] bash ${GENERATOR}"
-    else
-      bash "${GENERATOR}"
-    fi
-  else
-    echo "WARNING: generator script not found (${GENERATOR}); continuing without generation." >&2
-  fi
-fi
 
 IFS=',' read -r -a AMPLICONS <<< "${AMPLICONS_CSV}"
 

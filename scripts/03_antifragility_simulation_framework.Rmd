@@ -1,6 +1,6 @@
 ---
 title: "Antifragility in Stochastic Dynamical Systems (Simulation Framework)"
-author: "Vinayak Prakash Saini"
+author: "Ecology Graduate Student"
 date: "`r Sys.Date()`"
 output:
   html_document:

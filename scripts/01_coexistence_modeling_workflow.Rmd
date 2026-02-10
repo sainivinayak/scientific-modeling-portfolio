@@ -1,6 +1,6 @@
 ---
-title: "Light × Water Coexistence Analysis (Portfolio-Safe Demonstration)"
-author: "Vinayak Prakash Saini"
+title: "Light × Water Coexistence Analysis (Portfolio‑Safe Demonstration)"
+author: "Ecology Graduate Student"
 date: "`r Sys.Date()`"
 output:
   word_document:
